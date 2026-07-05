@@ -1,16 +1,16 @@
 """
-daily_scan.py — weekly momentum model with signal-strength weights.
+daily_scan_fullnse.py — full-NSE momentum scanner, WITH weak-market warnings.
 
-MODEL (backtested 2013-2026, after costs + 20% tax):
-  Weekly rebalance, 15 holdings, score-weighted (3-12% per name),
-  ATR x3 trailing stop, staged breadth exposure.
-  ~25% CAGR backtested / high-teens realistic | max drawdown ~ -27%.
+Same model as the Nifty-750 scanner, but tuned for an experimental/observational
+role on the wider ~2,000-stock universe. KEY DIFFERENCE: it always shows the
+top-ranked candidates for visibility (so you can watch what the wider universe
+is finding), but it makes the market-health status impossible to miss, and
+explicitly tells you NOT to buy when the underlying market is weak.
 
-BEHAVIOUR:
-  * WEEKLY rebalance: first run of a new ISO week -> BUY / SELL / KEEP lists.
-  * Other days: only stop-loss exits ("act now") or "no action".
-  * Names are ranked by signal strength; if you can't buy all 15, buy from the top.
-  * WEIGHT column = relative signal strength (position size), NOT a probability.
+Backtested result on full NSE (13y): ~14.6% CAGR / -43.5% max drawdown, i.e.
+meaningfully WORSE and riskier than the Nifty-750 scanner (~21-25% / ~-25%).
+Treat this scanner's picks as informational, not a trading instruction, unless
+the market-health banner below says the coast is clear.
 
 Secrets needed: EMAIL_USER, EMAIL_PASS, EMAIL_TO
 """
@@ -21,8 +21,9 @@ import pandas as pd, numpy as np, yfinance as yf
 SYMS = [l.strip() for l in open('symbols.txt') if l.strip()]
 STATE_FILE = 'state.json'
 N_FULL = 15
-W_MIN, W_MAX = 0.03, 0.12          # per-name weight bounds
-MIN_TURNOVER = 3e7                 # Rs.3cr/day liquidity floor (same in both universes)
+W_MIN, W_MAX = 0.03, 0.12
+MIN_TURNOVER = 3e7
+BREADTH_CASH, BREADTH_HALF = 0.30, 0.40   # same tiers as the main model
 
 def fetch():
     cl, hi, lo, vo = {}, {}, {}, {}
@@ -62,20 +63,24 @@ def compute(C, H, L, V):
     comp = (1 + C.pct_change().mean(axis=1)).cumprod()
     regime = bool(comp.iloc[-1] > comp.rolling(200).mean().iloc[-1])
     breadth = float((C > sma200).iloc[-1].mean())
-    if not regime or breadth < 0.30: exposure, nhold = 0.0, 0
-    elif breadth < 0.40:             exposure, nhold = 0.5, N_FULL // 2
-    else:                            exposure, nhold = 1.0, N_FULL
+    # market health verdict — independent of whether we show candidates
+    if not regime or breadth < BREADTH_CASH:
+        health, nhold, exposure = "WEAK", 0, 0.0
+    elif breadth < BREADTH_HALF:
+        health, nhold, exposure = "SHAKY", N_FULL // 2, 0.5
+    else:
+        health, nhold, exposure = "HEALTHY", N_FULL, 1.0
     price = C.iloc[-1]; stop_now = (hh22.iloc[-1] - 3*atr22.iloc[-1])
     elig = (advol.iloc[-1] >= MIN_TURNOVER) & (price > sma50.iloc[-1]) & (price > sma200.iloc[-1]) & RAM.iloc[-1].notna()
     scores = RAM.iloc[-1][elig].sort_values(ascending=False)
     asof = C.index[-1]
     return dict(asof=str(asof.date()), week=f"{asof.isocalendar().year}-W{asof.isocalendar().week:02d}",
-                regime=regime, breadth=breadth, exposure=exposure, nhold=nhold,
+                regime=regime, breadth=breadth, health=health, exposure=exposure, nhold=nhold,
                 ranked=list(scores.index), scores=scores, price=price, stop_now=stop_now,
                 nuniv=len(C.columns))
 
 def weights_for(m, names):
-    """Signal-strength weights: proportional to score, clipped to 3-12%, renormalised."""
+    if not names: return {}
     sc = np.array([max(float(m['scores'].get(s, 0.01)), 0.01) for s in names])
     w = sc / sc.sum()
     w = np.clip(w, W_MIN, W_MAX)
@@ -88,40 +93,73 @@ def load_state():
 def save_state(st):
     json.dump(st, open(STATE_FILE, 'w'), indent=2)
 
+def health_banner(m):
+    """Loud, impossible-to-miss market-health block. Always at the very top."""
+    L = []
+    if m['health'] == "WEAK":
+        L += ["=" * 60,
+              "  ⚠️  WEAK MARKET — DO NOT BUY FROM THIS LIST  ⚠️",
+              "=" * 60,
+              f"  Breadth is only {m['breadth']*100:.0f}% (need 30%+ to consider buying, 40%+ to go full).",
+              "  Fewer than a third of NSE stocks are in a healthy uptrend right now.",
+              "  This is exactly the condition that historically preceded deep,",
+              "  grinding drawdowns in the full-NSE backtest (-43% max drawdown).",
+              "  The names below are shown FOR INFORMATION ONLY — they are what the",
+              "  scanner is watching, NOT a buy list. Recommended action: hold cash.",
+              "=" * 60, ""]
+    elif m['health'] == "SHAKY":
+        L += ["=" * 60,
+              "  ⚠️  SHAKY MARKET — reduced size only  ⚠️",
+              "=" * 60,
+              f"  Breadth is {m['breadth']*100:.0f}% — moderate, not confirmed healthy.",
+              f"  If you act at all, only buy the TOP {m['nhold']} below, rest stays cash.",
+              "  Do not deploy full size in this condition.",
+              "=" * 60, ""]
+    else:
+        L += ["=" * 60,
+              "  ✅ HEALTHY MARKET — breadth confirms the trend",
+              "=" * 60,
+              f"  Breadth {m['breadth']*100:.0f}%, market trend up. Full-size candidates below.",
+              "=" * 60, ""]
+    return L
+
 def main_logic(m, st):
-    lines = [f"Momentum model — data as of {m['asof']}  ({m['nuniv']} stocks scanned)",
-             f"Market: trend={'UP' if m['regime'] else 'DOWN'}, breadth={m['breadth']*100:.0f}%, "
-             f"stance={'FULL' if m['exposure']==1 else 'HALF' if m['exposure']==0.5 else 'CASH'}", ""]
-    target = m['ranked'][:m['nhold']]
+    lines = [f"[FULL-NSE, EXPERIMENTAL] scan as of {m['asof']}  ({m['nuniv']} stocks scanned)", ""]
+    lines += health_banner(m)
+
+    # Always compute a display list (top 15 by rank) regardless of health,
+    # so you can SEE what the wider universe is finding — even in a weak market.
+    display_list = m['ranked'][:N_FULL]
+    buy_count = m['nhold']                      # how many are ACTUALLY actionable
+    W = weights_for(m, display_list[:buy_count]) if buy_count else {}
+
     held = st['held'] if st else []
     stops = dict(st['stops']) if st else {}
     last_week = st.get('week') if st else None
-    rebalance = (st is None) or (m['week'] != last_week) or (len(held) == 0 and m['nhold'] > 0)
+    rebalance = (st is None) or (m['week'] != last_week)
 
     if rebalance:
-        W = weights_for(m, target) if target else {}
+        target = display_list[:buy_count]       # only the actionable portion becomes "held"
         enter = [s for s in target if s not in held]
         exit_ = [s for s in held if s not in target]
-        keep  = [s for s in held if s in target]
         new_stops = {}
         for s in target:
             cur = float(m['stop_now'].get(s, np.nan))
             prev = stops.get(s, cur)
             new_stops[s] = max(prev, cur) if not np.isnan(cur) else prev
-        subject = f"WEEKLY REBALANCE {m['asof']} — buy {len(enter)}, sell {len(exit_)}"
-        lines += [">>> WEEKLY REBALANCE — target list, STRONGEST FIRST.",
-                  "    Can't buy all? Buy from the TOP DOWN. Weight = position size (signal strength, not a guarantee).", ""]
-        lines.append(f"{'#':>2} {'STOCK':12}{'WEIGHT':>8}{'PRICE':>10}{'STOP':>10}{'ACTION':>8}")
-        for i, s in enumerate(target, 1):
-            act = "BUY" if s in enter else "KEEP"
-            lines.append(f"{i:>2} {s:12}{W[s]*100:7.1f}%{m['price'][s]:10.1f}{new_stops[s]:10.1f}{act:>8}")
-        lines.append("SELL (dropped out):" + ("  none" if not exit_ else ""))
-        for s in exit_:
-            lines.append(f"   - {s:12} at ~{float(m['price'].get(s, float('nan'))):.1f}")
-        if m['exposure'] == 0.5:
-            lines += ["", f"NOTE: HALF stance — hold only the top {m['nhold']}, keep the rest of your capital in cash."]
-        elif m['exposure'] == 0.0:
-            lines += ["", "NOTE: CASH stance — hold nothing this week."]
+        subject = f"[FULL-NSE] {m['health']} {m['asof']} — {len(target)} actionable"
+        lines.append(f"{'#':>2} {'STOCK':12}{'WEIGHT':>8}{'PRICE':>10}{'STOP':>10}{'STATUS':>10}")
+        for i, s in enumerate(display_list, 1):
+            actionable = s in target
+            w_str = f"{W[s]*100:6.1f}%" if actionable else "   --  "
+            status = "BUY" if (actionable and s in enter) else ("KEEP" if actionable else "watch-only")
+            px = m['price'].get(s, float('nan'))
+            stop_disp = new_stops.get(s, m['stop_now'].get(s, float('nan')))
+            lines.append(f"{i:>2} {s:12}{w_str:>8}{px:10.1f}{stop_disp:10.1f}{status:>10}")
+        if exit_:
+            lines.append("\nSELL (dropped out):")
+            for s in exit_:
+                lines.append(f"   - {s:12} at ~{float(m['price'].get(s, float('nan'))):.1f}")
         new_state = dict(week=m['week'], held=target, stops=new_stops)
     else:
         triggered, surviving, new_stops = [], [], {}
@@ -135,22 +173,30 @@ def main_logic(m, st):
             else:
                 surviving.append(s)
         if triggered:
-            subject = f"STOP HIT {m['asof']} — SELL {len(triggered)} now"
-            lines += [">>> ACT NOW — closed below stop, SELL today:", ""]
+            subject = f"[FULL-NSE] STOP HIT {m['asof']} — SELL {len(triggered)} now"
+            lines.append(">>> ACT NOW — closed below stop, SELL today:\n")
             for s, px, tr_ in triggered:
                 lines.append(f"   ! {s:12} price {px:.1f}  <  stop {tr_:.1f}  -> SELL")
-            lines += ["", "Still holding:"]
         else:
-            subject = f"Scan {m['asof']} — no action"
-            lines += ["No rebalance today, no stops hit. HOLD everything.", "", "Currently holding:"]
-        for s in surviving:
-            lines.append(f"   = {s:12}  stop {new_stops.get(s, float('nan')):.1f}")
+            subject = f"[FULL-NSE] {m['health']} {m['asof']} — no action"
+            lines.append("No rebalance today, no stops hit.")
+        if surviving:
+            lines.append("\nCurrently holding:")
+            for s in surviving:
+                lines.append(f"   = {s:12}  stop {new_stops.get(s, float('nan')):.1f}")
+        if not held:
+            lines.append("\n(No live positions from this scanner right now.)")
+            lines.append("Top of the watchlist, for reference:")
+            for i, s in enumerate(display_list[:5], 1):
+                lines.append(f"   {i}. {s:12} price {m['price'].get(s, float('nan')):.1f}")
         new_state = dict(week=last_week, held=surviving, stops={s: new_stops[s] for s in surviving})
 
-    lines += ["", "Weekly rebalance; between times only sell on a stop.",
-              "Weights are relative signal strength for position sizing — roughly half of picks",
-              "still lose; the edge is the portfolio, not any single name.",
-              "Not investment advice. Survivorship-biased backtest; realistic expectation is lower."]
+    lines += ["", "-"*60,
+              "This is the EXPERIMENTAL full-NSE scanner (wider, riskier universe).",
+              "Backtest: ~14.6% CAGR / -43.5% max drawdown over 11y — meaningfully",
+              "worse and more volatile than your main Nifty-750 model (~21-25% / ~-25%).",
+              "Only act on 'BUY'/'KEEP' rows when the banner above says HEALTHY or SHAKY.",
+              "'watch-only' rows are NOT recommendations. Not investment advice."]
     return subject, "\n".join(lines), new_state
 
 def send(subject, body):
@@ -164,14 +210,12 @@ if __name__ == '__main__':
     n_fetched = C.shape[1]
     n_with_history = int((C.notna().sum() >= 200).sum())
     if n_fetched < 0.65 * len(SYMS) or n_with_history < 0.7 * n_fetched:
-        send("Stock scan — DATA PROBLEM (no signal today)",
+        send("[FULL-NSE] Stock scan — DATA PROBLEM (no signal today)",
              f"Fetched only {n_fetched}/{len(SYMS)} stocks; {n_with_history} with full history.\n"
              "Too incomplete to trust. NO ACTION today; state unchanged; retrying tomorrow.")
         raise SystemExit
     m = compute(C, H, L, V)
     subject, body, new_state = main_logic(m, load_state())
-    if len(SYMS) > 1000:
-        subject = "[FULL-NSE] " + subject
     save_state(new_state)
     send(subject, body)
     print(subject)
