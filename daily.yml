@@ -1,0 +1,21 @@
+name: Daily Stock Scan
+
+on:
+  schedule:
+    - cron: '30 3 * * 1-5'      # 09:00 IST, Monday–Friday (03:30 UTC)
+  workflow_dispatch:            # lets you run it manually with a button
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python daily_scan.py
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO:   ${{ secrets.EMAIL_TO }}
