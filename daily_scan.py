@@ -127,9 +127,10 @@ def main_logic(m, st):
     lines = [f"[FULL-NSE, EXPERIMENTAL] scan as of {m['asof']}  ({m['nuniv']} stocks scanned)", ""]
     lines += health_banner(m)
 
-    # Always compute a display list (top 15 by rank) regardless of health,
+    # Always compute a display list (top 20 by rank) regardless of health,
     # so you can SEE what the wider universe is finding — even in a weak market.
-    display_list = m['ranked'][:N_FULL]
+    # Only the first N_FULL (or fewer, per breadth tier) are ever actionable.
+    display_list = m['ranked'][:20]
     buy_count = m['nhold']                      # how many are ACTUALLY actionable
     W = weights_for(m, display_list[:buy_count]) if buy_count else {}
 
@@ -155,7 +156,7 @@ def main_logic(m, st):
             status = "BUY" if (actionable and s in enter) else ("KEEP" if actionable else "watch-only")
             px = m['price'].get(s, float('nan'))
             stop_disp = new_stops.get(s, m['stop_now'].get(s, float('nan')))
-            lines.append(f"{i:>2} {s:12}{w_str:>8}{px:10.1f}{stop_disp:10.1f}{status:>10}")
+            lines.append(f"{i:>2} {s:12}{w_str:>8}{px:10.1f}{stop_disp:10.1f} {status:>11}")
         if exit_:
             lines.append("\nSELL (dropped out):")
             for s in exit_:
@@ -186,9 +187,9 @@ def main_logic(m, st):
                 lines.append(f"   = {s:12}  stop {new_stops.get(s, float('nan')):.1f}")
         if not held:
             lines.append("\n(No live positions from this scanner right now.)")
-            lines.append("Top of the watchlist, for reference:")
-            for i, s in enumerate(display_list[:5], 1):
-                lines.append(f"   {i}. {s:12} price {m['price'].get(s, float('nan')):.1f}")
+            lines.append("Top 20 of the watchlist, for reference (NOT a buy list):")
+            for i, s in enumerate(display_list[:20], 1):
+                lines.append(f"   {i:>2}. {s:12} price {m['price'].get(s, float('nan')):.1f}")
         new_state = dict(week=last_week, held=surviving, stops={s: new_stops[s] for s in surviving})
 
     lines += ["", "-"*60,
