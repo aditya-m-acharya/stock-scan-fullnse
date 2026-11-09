@@ -1,5 +1,21 @@
 {
-  "week": "2026-W45",
-  "held": [],
-  "stops": {}
+  "week": "2026-W46",
+  "held": [
+    "CUPID",
+    "SHREEJISPG",
+    "GCSL",
+    "LAURUSLABS",
+    "SPECTRUM",
+    "SBC",
+    "TBZ"
+  ],
+  "stops": {
+    "CUPID": 322.0272799405185,
+    "SHREEJISPG": 819.720439564098,
+    "GCSL": 743.0681679465554,
+    "LAURUSLABS": 2255.6000366210938,
+    "SPECTRUM": 3994.4274347478695,
+    "SBC": 63.552277304909445,
+    "TBZ": 662.3795304731889
+  }
 }
